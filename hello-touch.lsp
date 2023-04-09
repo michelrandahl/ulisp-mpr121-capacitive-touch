@@ -18,6 +18,13 @@
       (push (- to i) xs))
     xs))
 
+(defun print-str-num (s n)
+  (print
+    (concatenate
+      'string
+      s ": "
+      (with-output-to-string (str) (princ n str)))))
+
 (defun repeat (n f)
   (mapcar (lambda (i) (f)) (range 0 n)))
 
@@ -235,7 +242,6 @@
 ; This function simply continues running until the last five baseline values has stabalized to the same value.
 ; The MPR121 controller will keep adjusting the baseline registers on each touch, but will eventually stabalize
 (defun calibrate-baseline-register (electrode-baseline-reg)
-  (pinmode irq-pin :input)
   (let ((ring-buffer (mk-ring-buffer 5)))
     (loop
       (when (not (digitalread irq-pin))
@@ -245,32 +251,34 @@
             (let* ((baseline (read-baseline electrode-baseline-reg))
                    (xs (ring-buffer baseline)))
               (print xs)
-              (when (and (not (zerop (ahead foo)))
+              (when (and (not (zerop (ahead xs)))
                          (array-all-equal xs))
-                (print "calibration finished")
                 (return)))))))))
+
+(defun calibrate-all-sensors ()
+  (dotimes (i 12)
+    (print-str-num "calibrating sensor" i)
+    (calibrate-baseline-register (+ electrode-1-baseline i))))
 
 (defun calibration-process ()
   (setup enable-all-touch-sensors)
   (print "setup done, waiting for controller to be ready")
   (delay 16000)
   (print "controller is ready")
-  (dotimes (i 12)
-    (calibrate-baseline-register (+ electrode-1-baseline i))))
+  (pinmode irq-pin :input)
+  (calibrate-all-sensors)
+  (print "calibration done"))
 (calibration-process)
 
-(defun calibration-process2 ()
-  (setup enable-all-touch-sensors)
-  (print "setup done, waiting for controller to be ready")
-  (delay 16000)
-  (print "controller is ready")
-  (pinmode irq-pin :input)
-  (let ((ring-buffers (repeat 12 (lambda () (mk-ring-buffer 2))))
+(defun calibrate-all-sensors2 ()
+  (let ((ring-buffers (repeat 12 (lambda () (mk-ring-buffer 3))))
         (stop-predicate (lambda (ring-buffer-arrays)
                           (forall (lambda (arr)
                                     (and (not (zerop (ahead arr)))
                                          (array-all-equal arr)))
-                                  ring-buffer-arrays))))
+                                  ring-buffer-arrays)))
+        (counter 0))
+    (print-str-num "calibration-round" counter)
     (loop
       (when (not (digitalread irq-pin))
         (let* ((touch-data (interpret-read (read-touch-status)))
@@ -281,11 +289,19 @@
                                         (print res)
                                         res))
                                     ring-buffers)))
-              (dolist (x res)
-                (print x))
-              (when (stop-predicate res)
+              (incf counter)
+              (print-str-num "calibration-round" counter)
+              (when (or (stop-predicate res) (>= counter 50))
                 (print "calibration done")
                 (return)))))))))
+
+(defun calibration-process2 ()
+  (setup enable-all-touch-sensors)
+  (print "setup done, waiting for controller to be ready")
+  (delay 16000)
+  (print "controller is ready")
+  (pinmode irq-pin :input)
+  (calibrate-all-sensors2))
 (calibration-process2)
 
 ; irq is connected to pin 8
