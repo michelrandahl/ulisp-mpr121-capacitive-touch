@@ -25,8 +25,11 @@
       s ": "
       (with-output-to-string (str) (princ n str)))))
 
-(defun repeat (n f)
+(defun repeat-fun (n f)
   (mapcar (lambda (i) (f)) (range 0 n)))
+
+(defun repeat-val (n v)
+  (mapcar (lambda (i) v) (range 0 n)))
 
 (defun repeat-arr (n f)
   (let ((arr (make-array n)))
@@ -61,9 +64,6 @@
 
 (defvar mpr121-addr #x5B)
 
-;(defun mpr121-i2c (stream-fn)
-;  (with-i2c (str 0 mpr121-addr)
-;    (stream-fn str)))
 (defun write-bytes (register-addr xs)
   (with-i2c (str 0 mpr121-addr)
             (write-byte register-addr str)
@@ -74,57 +74,37 @@
   (with-i2c (str 0 mpr121-addr)
             (write-byte register-addr str)
             (restart-i2c str n)
-            (repeat n (lambda () (read-byte str)))))
-
-(defvar soft-reset #x80)
-
-(defvar soft-reset-val #x63)
-
-(defvar electrode-configuration #x5E)
-
-(defvar touch-status-reg #x00)
+            (repeat-fun n (lambda () (read-byte str)))))
 
 (defun set-treshold-values (touch-treshold release-treshold)
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte #x41 str)
-            (dotimes (x 12)
-              (write-byte touch-treshold str)
-              (write-byte release-treshold str))))
+  (let ((number-of-electrodes 12)
+        (electrode-0-touch-treshold-reg #x41))
+    (write-bytes electrode-0-touch-treshold-reg
+                 (mapcan list
+                         (repeat-val number-of-electrodes touch-treshold)
+                         (repeat-val number-of-electrodes release-treshold)))))
 
 (defun analog-frontend-and-filter ()
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte #x5C str)
-            (write-byte #x10 str)
-            (write-byte #x24 str)
-            (write-byte #x80 str)))
+  (let ((afe-configuration-1-reg #x5C))
+    (write-bytes afe-configuration-1-reg '(#x10 #x24 #x80))))
 
 (defun auto-config ()
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte #x7B str)
-            (write-byte #x0B str)
-            (write-byte #x80 str)
-            (write-byte #xC8 str)
-            (write-byte #x82 str)
-            (write-byte #xB4 str)))
+  (let ((auto-config-control-reg #x7B))
+    (write-bytes auto-config-control-reg '(#x0B #x80 #xC8 #x82 #xB4))))
 
 (defun setup (config-val)
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte soft-reset str)
-            (write-byte soft-reset-val str))
-  (set-treshold-values 10 8)
-  (analog-frontend-and-filter)
-  (auto-config)
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte electrode-configuration str)
-            (write-byte config-val str)))
+  (let ((soft-reset #x80)
+        (soft-reset-val #x63)
+        (electrode-configuration #x5E))
+    (write-bytes soft-reset (list soft-reset-val))
+    (set-treshold-values 10 8)
+    (analog-frontend-and-filter)
+    (auto-config)
+    (write-bytes electrode-configuration (list config-val))))
 
 (defun read-touch-status ()
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte touch-status-reg str)
-            (restart-i2c str 2)
-            (list
-              (read-byte str)
-              (read-byte str))))
+  (let ((touch-status-reg #x00))
+    (read-bytes touch-status-reg 2)))
 
 (defvar buttons
   '((#b000000000001 . one)
@@ -140,6 +120,20 @@
     (#b010000000000 . nine)
     (#b100000000000 . "#")))
 
+(defvar sensors
+  '((#b000000000001 . 0)
+    (#b000000000010 . 1)
+    (#b000000000100 . 2)
+    (#b000000001000 . 3)
+    (#b000000010000 . 4)
+    (#b000000100000 . 5)
+    (#b000001000000 . 6)
+    (#b000010000000 . 7)
+    (#b000100000000 . 8)
+    (#b001000000000 . 9)
+    (#b010000000000 . 10)
+    (#b100000000000 . 11)))
+
 (defun match-button (input-val)
   (let ((result nil))
     (dolist (button buttons)
@@ -148,65 +142,33 @@
           (setf result (cdr button))
           (return))))
     result))
-(match-button #b100)
-(when (not (zerop (logand #b100 #b100)))
-  (print "hello"))
-
-; TODO how to find the matching bitmask for the pressed button...?
-; perhaps combine with the pressure data when determining which button it is
-(assoc #b00000001 buttons)
 
 (defun interpret-read (read-res)
-  (let* ((lsb (car read-res))
-         (msb (car (cdr read-res)))
+  (let* ((lsb (first read-res))
+         (msb (second read-res))
          (combined (logior (ash msb 8) lsb))
          (sensor-data (logand combined #b0000111111111111))
          (over-current-flag (logand msb #b10000000)))
     (list (cons 'sensor-data sensor-data)
           (cons 'over-current-flag over-current-flag))))
 
-; howto alist
-;(defvar hello 42)
-;(assoc 'foo (list (cons 'foo hello)
-;                  (cons 'bar "stuff")))
-;(assoc ':foo '((:foo . #.hello)))
-
-
 (defvar enable-proximity (ash #b0011 4))
 
 (defvar enable-all-touch-sensors #b1100)
-
-;(defun read-capacitive-touch2 ()
-;  (setup enable-all-touch-sensors)
-;  (print "setup is done")
-;  (loop (print (interpret-read (read-touch-status)))))
-
-;(defun wait-for-touch-status-clear ()
-;  (loop
-;    (let ((status (interpret-read (read-touch-status))))
-;      (when (zerop status)
-;        (print "ready")
-;        (return))
-;      (print "waiting")
-;      (delay 1000))))
 
 (defvar electrode-1-filtered-data #x04)
 
 (defvar electrode-1-baseline #x1E)
 
 (defun read-filtered-data (electrode-filtered-data-reg)
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte electrode-filtered-data-reg str)
-            (restart-i2c str 2)
-            (let ((lsb (read-byte str))
-                  (msb (read-byte str)))
-              (logior (ash msb 8) lsb))))
+  (let* ((electrode-0-filtered-data-reg #x04)
+         (bytes (read-bytes electrode-filtered-data-reg 2))
+         (lsb (first bytes))
+         (msb (second bytes)))
+    (logior (ash msb 8) lsb)))
 
 (defun read-baseline (electrode-baseline-reg)
-  (with-i2c (str 0 mpr121-addr)
-            (write-byte electrode-baseline-reg str)
-            (restart-i2c str 1)
-            (read-byte str)))
+  (car (read-bytes electrode-baseline-reg 1)))
 
 (defvar calibrated-baseline-values nil)
 
@@ -266,43 +228,9 @@
   (delay 16000)
   (print "controller is ready")
   (pinmode irq-pin :input)
-  (calibrate-all-sensors)
-  (print "calibration done"))
+  (calibrate-all-sensors))
+
 (calibration-process)
-
-(defun calibrate-all-sensors2 ()
-  (let ((ring-buffers (repeat 12 (lambda () (mk-ring-buffer 3))))
-        (stop-predicate (lambda (ring-buffer-arrays)
-                          (forall (lambda (arr)
-                                    (and (not (zerop (ahead arr)))
-                                         (array-all-equal arr)))
-                                  ring-buffer-arrays)))
-        (counter 0))
-    (print-str-num "calibration-round" counter)
-    (loop
-      (when (not (digitalread irq-pin))
-        (let* ((touch-data (interpret-read (read-touch-status)))
-               (activated-sensors (cdr (assoc 'sensor-data touch-data))))
-          (when (not (zerop activated-sensors))
-            (let ((res (map-indexed (lambda (i ring-buffer)
-                                      (let ((res (ring-buffer (read-baseline (+ electrode-1-baseline i)))))
-                                        (print res)
-                                        res))
-                                    ring-buffers)))
-              (incf counter)
-              (print-str-num "calibration-round" counter)
-              (when (or (stop-predicate res) (>= counter 50))
-                (print "calibration done")
-                (return)))))))))
-
-(defun calibration-process2 ()
-  (setup enable-all-touch-sensors)
-  (print "setup done, waiting for controller to be ready")
-  (delay 16000)
-  (print "controller is ready")
-  (pinmode irq-pin :input)
-  (calibrate-all-sensors2))
-(calibration-process2)
 
 ; irq is connected to pin 8
 ; note that irq gets triggered on touch and then it gets reset back when the touch register is read
@@ -324,24 +252,28 @@
 
 (defun read-irq-signal ()
   (setup enable-all-touch-sensors)
-  (print "setup done, waiting for controller to be ready")
-  (delay 15000)
-  (print "controller is ready")
   (pinmode irq-pin :input)
+  (print "waiting for controller to be ready")
+  (delay 10000)
+  (print "calibration process, please touch until done")
+  (calibrate-all-sensors)
+  (print "READY")
   (loop
     (when (not (digitalread irq-pin))
       (let* ((touch-data (interpret-read (read-touch-status)))
-             (activated-sensors (cdr (assoc 'sensor-data touch-data))))
+             (activated-sensors (cdr (assoc 'sensor-data touch-data)))
+             (filtered-data (read-filtered-data )))
         (when (not (zerop activated-sensors))
           (let ((button (match-button activated-sensors)))
             (print button)))))))
 
 (defun read-irq-signal ()
   (setup enable-all-touch-sensors)
-  (print "setup done, waiting for controller to be ready")
-  (delay 15000)
-  (print "controller is ready")
   (pinmode irq-pin :input)
+  (print "waiting for controller to be ready")
+  (delay 10000)
+  (print "calibration process, please touch until done")
+  (calibrate-all-sensors)
   (loop
     (when (not (digitalread irq-pin))
       (print (interpret-read (read-touch-status))))))
