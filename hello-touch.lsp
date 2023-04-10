@@ -60,6 +60,8 @@
 (defun map-indexed (f xs)
   (mapcan (lambda (i x) (list (f i x))) (range 0 (length xs)) xs))
 
+; note that irq gets triggered on touch and then it gets reset back when the touch register is read
+; irq is connected to pin 8
 (defvar irq-pin 8)
 
 (defvar mpr121-addr #x5B)
@@ -106,19 +108,7 @@
   (let ((touch-status-reg #x00))
     (read-bytes touch-status-reg 2)))
 
-(defvar buttons
-  '((#b000000000001 . one)
-    (#b000000000010 . four)
-    (#b000000000100 . seven)
-    (#b000000001000 . *)
-    (#b000000010000 . two)
-    (#b000000100000 . five)
-    (#b000001000000 . eight)
-    (#b000010000000 . zero)
-    (#b000100000000 . three)
-    (#b001000000000 . six)
-    (#b010000000000 . nine)
-    (#b100000000000 . "#")))
+(defvar buttons #('one 'four 'seven '* 'two 'five 'eight 'zero 'three 'six 'nine 'x))
 
 (defvar sensors
   '((#b000000000001 . 0)
@@ -134,14 +124,11 @@
     (#b010000000000 . 10)
     (#b100000000000 . 11)))
 
-(defun match-button (input-val)
-  (let ((result nil))
-    (dolist (button buttons)
-      (let ((button-val (car button)))
-        (when (not (zerop (logand button-val input-val)))
-          (setf result (cdr button))
-          (return))))
-    result))
+(defun match-sensor (input-val)
+  (dolist (sensor-lookup-pair sensors)
+    (let ((sensor-mask (car sensor-lookup-pair)))
+      (when (plusp (logand sensor-mask input-val))
+        (return (cdr sensor-lookup-pair))))))
 
 (defun interpret-read (read-res)
   (let* ((lsb (first read-res))
@@ -160,15 +147,18 @@
 
 (defvar electrode-1-baseline #x1E)
 
-(defun read-filtered-data (electrode-filtered-data-reg)
+(defun read-filtered-data (sensor-number)
   (let* ((electrode-0-filtered-data-reg #x04)
-         (bytes (read-bytes electrode-filtered-data-reg 2))
+         (reg (+ electrode-0-filtered-data-reg (* sensor-number 2)))
+         (bytes (read-bytes reg 2))
          (lsb (first bytes))
          (msb (second bytes)))
     (logior (ash msb 8) lsb)))
 
-(defun read-baseline (electrode-baseline-reg)
-  (car (read-bytes electrode-baseline-reg 1)))
+(defun read-baseline (sensor-number)
+  (let* ((electrode-1-baseline #x1E)
+         (reg (+ electrode-1-baseline sensor-number)))
+    (first (read-bytes reg 1))))
 
 (defvar calibrated-baseline-values nil)
 
@@ -203,14 +193,14 @@
 ;; TODO we want to calibrate all the baseline registers... perhaps its enough to look at the data for just one of them?
 ; This function simply continues running until the last five baseline values has stabalized to the same value.
 ; The MPR121 controller will keep adjusting the baseline registers on each touch, but will eventually stabalize
-(defun calibrate-baseline-register (electrode-baseline-reg)
-  (let ((ring-buffer (mk-ring-buffer 5)))
+(defun calibrate-baseline-register (sensor-number)
+  (let ((ring-buffer (mk-ring-buffer 7)))
     (loop
       (when (not (digitalread irq-pin))
         (let* ((touch-data (interpret-read (read-touch-status)))
                (activated-sensors (cdr (assoc 'sensor-data touch-data))))
           (when (not (zerop activated-sensors))
-            (let* ((baseline (read-baseline electrode-baseline-reg))
+            (let* ((baseline (read-baseline sensor-number))
                    (xs (ring-buffer baseline)))
               (print xs)
               (when (and (not (zerop (ahead xs)))
@@ -219,8 +209,8 @@
 
 (defun calibrate-all-sensors ()
   (dotimes (i 12)
-    (print-str-num "calibrating sensor" i)
-    (calibrate-baseline-register (+ electrode-1-baseline i))))
+    (format t "~&calibrating sensor: ~d" i)
+    (calibrate-baseline-register i)))
 
 (defun calibration-process ()
   (setup enable-all-touch-sensors)
@@ -230,27 +220,87 @@
   (pinmode irq-pin :input)
   (calibrate-all-sensors))
 
-(calibration-process)
 
-; irq is connected to pin 8
-; note that irq gets triggered on touch and then it gets reset back when the touch register is read
-(defun read-irq-signal ()
+; This assumes that the dfrobot number pad is connected
+(defun read-number-pad ()
   (setup enable-all-touch-sensors)
-  (print "setup done, waiting for controller to be ready")
-  (delay 8000)
-  (print "controller is ready")
   (pinmode irq-pin :input)
-  (loop (when (not (digitalread irq-pin))
-          (let ((touch-status (read-touch-status))
-                (filtered-data (read-filtered-data electrode-1-filtered-data))
-                (baseline-data (read-baseline electrode-1-baseline)))
-            (print touch-status)
-            (print filtered-data)
-            (print baseline-data)))))
+  (print "waiting for controller to be ready")
+  (delay 10000)
+  (print "READY")
+  (loop
+    (when (not (digitalread irq-pin))
+      (let* ((touch-data (interpret-read (read-touch-status)))
+             (activated-sensors (cdr (assoc 'sensor-data touch-data))))
+        (when (plusp activated-sensors)
+          (let* ((sensor-number (match-sensor activated-sensors))
+                 (button (car (cdr (aref buttons sensor-number)))))
+            (print button)))))))
+(read-number-pad)
 
-; TODO (- filtered-data baseline-data)
+; x-axis bit 0-4
+; y-axis bit 5-11
 
-(defun read-irq-signal ()
+(defvar x-sensors
+  '((#b000000000001 . 0)
+    (#b000000000010 . 1)
+    (#b000000000100 . 2)
+    (#b000000001000 . 3)
+    (#b000000010000 . 4)))
+(defvar y-sensors
+  '((#b000000100000 . 5)
+    (#b000001000000 . 6)
+    (#b000010000000 . 7)
+    (#b000100000000 . 8)
+    (#b001000000000 . 9)
+    (#b010000000000 . 10)
+    (#b100000000000 . 11)))
+
+(defvar x-values
+  '((#b00001 . 0)
+    (#b00011 . 1)
+    (#b00010 . 2)
+    (#b00110 . 3)
+    (#b00100 . 4)
+    (#b01100 . 5)
+    (#b01000 . 6)
+    (#b11000 . 7)
+    (#b10000 . 8)))
+(defvar y-values
+  '((#b0000001 . 0)
+    (#b0000011 . 1)
+    (#b0000010 . 2)
+    (#b0000110 . 3)
+    (#b0000100 . 4)
+    (#b0001100 . 5)
+    (#b0001000 . 6)
+    (#b0011000 . 7)
+    (#b0010000 . 8)
+    (#b0110000 . 9)
+    (#b0100000 . 10)
+    (#b1100000 . 11)
+    (#b1000000 . 12)))
+
+; TODO save last registered value, if current value is nil then use the old value
+; todo increase resolution by using the capacitance value as an offset
+; .... determine offset by looking at the neighbor sensors and see which one has lowest value (first check the bits)
+; .... if both neighbors are equal, then we must be on top
+; .... if value is negative, then we must be on top
+; .... if sensor is at the edge, then the offset can only go in one direction
+(defun interpret-xy-touch (activated-sensor-bits)
+  (let* ((x-axis      (logand #b000000011111 activated-sensors))
+         (y-axis (ash (logand #b111111100000 activated-sensors) -5))
+         (try-match (lambda (sensor-mask-num-pair)
+                      (let ((sensor-mask (car sensor-mask-num-pair))
+                            (sensor-num (cdr sensor-mask-num-pair)))
+                        (when (plusp (logand sensor-mask activated-sensor-bits))
+                          (list sensor-num)))))
+         (x-sensors (mapcan try-match x-sensors))
+         (y-sensors (mapcan try-match y-sensors)))
+    (list (cdr (assoc x-axis x-values))
+          (cdr (assoc y-axis y-values)))))
+
+(defun read-touch-pad ()
   (setup enable-all-touch-sensors)
   (pinmode irq-pin :input)
   (print "waiting for controller to be ready")
@@ -262,20 +312,21 @@
     (when (not (digitalread irq-pin))
       (let* ((touch-data (interpret-read (read-touch-status)))
              (activated-sensors (cdr (assoc 'sensor-data touch-data)))
-             (filtered-data (read-filtered-data )))
-        (when (not (zerop activated-sensors))
-          (let ((button (match-button activated-sensors)))
-            (print button)))))))
+             (x-axis (logand #b000000011111 activated-sensors))
+             (y-axis (ash (logand #b111111100000 activated-sensors) -5)))
+        (when (plusp activated-sensors)
+          (let* ((sensor-number (match-sensor activated-sensors))
+                 (xs (mapcar (lambda (i)
+                               (let ((baseline (read-baseline i))
+                                     (filtered (read-filtered-data i)))
+                                 (- filtered baseline)))
+                             (range 0 12)))
+                 (xy-touch (interpret-xy-touch activated-sensors)))
+            (format t "~&~12,'0b" activated-sensors)
+            (format t "~&x-axis: ~5,'0b" x-axis)
+            (format t "~&y-axis: ~7,'0b" y-axis)
+            (print (reverse xs))
+            (print xy-touch)))))))
 
-(defun read-irq-signal ()
-  (setup enable-all-touch-sensors)
-  (pinmode irq-pin :input)
-  (print "waiting for controller to be ready")
-  (delay 10000)
-  (print "calibration process, please touch until done")
-  (calibrate-all-sensors)
-  (loop
-    (when (not (digitalread irq-pin))
-      (print (interpret-read (read-touch-status))))))
+(read-touch-pad)
 
-(read-irq-signal)
